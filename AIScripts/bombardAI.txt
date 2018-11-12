@@ -1,0 +1,59 @@
+//Kinetic ordnance drop point targeting assist by 2crashandburn     
+//v1.2    
+     
+//Very simple script for giving people a bad day by dropping stuff on them using only gravity with pinpoint accuracy     
+//Setup is simple: get a programmable block with this script, a camera and an lcd     
+//Using it: go into camera view, look at your victim and run this script from the toolbar. Then get the gps coords from the lcd panel     
+//You can do this from your doomsday device or a small scouting vessel     
+     
+string controlName = "Cockpit";	//cockpit or remote control     
+string cameraName = "Camera";		//camera used for targeting     
+string lcdName = "LCD Panel";			//lcd to display gps coords     
+double range = 15000;					//range you want to scan (recommended max is world viewrange setting)     
+double dist = 2000;						//distance of drop point above target     
+   
+Vector3D gravLocal = new Vector3D(0,0,0);   
+Vector3D dropPoint = new Vector3D(0,0,0);   
+string gpsTarget;   
+string gpsDrop;   
+string text;   
+    
+	
+	
+	
+void Main() {
+	
+}
+
+Vector3D getPlanetCentre() {
+	//Get planetary centre gps from control block     
+	IMyShipController control = GridTerminalSystem.GetBlockWithName(controlName) as IMyShipController;  
+	if(control == null){  
+		Echo("Control block not found");  
+		return;  
+	}  
+	Vector3D planetCentre = new Vector3D(0,0,0);     
+	bool insideGrav = control.TryGetPlanetPosition(out planetCentre);  
+	   
+	if (insideGrav){
+		return planetCentre;
+	}
+	else {
+		return null;
+	}
+	
+}
+
+Vector3D getPositionOfNearestEnemyBase() {
+	GetAllEnemyGrids
+}
+
+Vector3D getBombardStartLocation(Vector3D enemyBaseLocation, Vector3D planetCentre) {
+	Vector3D gravLocal = Vector3D.Normalize(enemyBaseLocation - planetCentre);     
+	//Create drop point gps     
+	return targetData.HitPosition.Value + gravLocal*dist;     
+}
+
+void flyToLocation(Vector3D location) {
+	
+}
