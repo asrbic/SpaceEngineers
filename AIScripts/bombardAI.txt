@@ -6,54 +6,157 @@
 //Using it: go into camera view, look at your victim and run this script from the toolbar. Then get the gps coords from the lcd panel     
 //You can do this from your doomsday device or a small scouting vessel     
      
-string controlName = "Cockpit";	//cockpit or remote control     
-string cameraName = "Camera";		//camera used for targeting     
-string lcdName = "LCD Panel";			//lcd to display gps coords     
 double range = 15000;					//range you want to scan (recommended max is world viewrange setting)     
 double dist = 2000;						//distance of drop point above target     
-   
-Vector3D gravLocal = new Vector3D(0,0,0);   
-Vector3D dropPoint = new Vector3D(0,0,0);   
-string gpsTarget;   
-string gpsDrop;   
-string text;   
-    
-	
-	
+int speedLimit = 100;
+
+bool planetCentreSet = false;
+bool enemyBaseSet = false;
+bool dropPointSet = false;
+Vector3D planetCentreGPS;
+Vector3D enemyBaseGPS;
+Vector3D dropPointGPS;
+string remoteControlName = "Remote Control";
+IMyRemoteControl remoteControl = null;	
 	
 void Main() {
-	
+	if(remoteControl == null) {
+		remoteControl = GridTerminalSystem.GetBlockWithName(remoteControlName) as IMyRemoteControl;
+		if(remoteControl == null) {
+			//no remote control found, do nothing
+			return;
+		}
+	}
+	if(!dropPointSet) {
+		planetCentreSet = getPlanetCentre(ref planetCentreGPS);
+		enemyBaseSet = getPositionOfLargestNearbyEnemyBase(ref enemyBaseGPS);
+		if (planetCentreSet && enemyBaseSet) {
+			dropPointSet = getBombardStartLocation(enemyBaseGPS, planetCentreGPS, ref dropPointGPS);
+			if(dropPointSet) {
+				flyToLocation(dropPointGPS);
+			}
+		}
+	}
 }
 
-Vector3D getPlanetCentre() {
+bool getPlanetCentre(ref Vector3D coords) {
 	//Get planetary centre gps from control block     
-	IMyShipController control = GridTerminalSystem.GetBlockWithName(controlName) as IMyShipController;  
-	if(control == null){  
+	IMyShipController control = GridTerminalSystem.GetBlockWithName(remoteControlName) as IMyShipController;  
+	if(control == null) {  
 		Echo("Control block not found");  
-		return;  
+		return false;  
 	}  
 	Vector3D planetCentre = new Vector3D(0,0,0);     
 	bool insideGrav = control.TryGetPlanetPosition(out planetCentre);  
 	   
 	if (insideGrav){
-		return planetCentre;
+		coords = planetCentre;
+		return true;
 	}
 	else {
-		return null;
+		return false;
 	}
 	
 }
 
-Vector3D getPositionOfNearestEnemyBase() {
-	GetAllEnemyGrids
+bool getPositionOfLargestNearbyEnemyBase(ref Vector3D coords) {
+	int biggestGridSize = -1;
+	long biggestGridId = -1;
+	List<long> enemyGridIds = GetAllEnemyGrids();
+	Echo("Found " + enemyGridIds.Count + " enemy grids.\n");
+	foreach (long gridId in enemyGridIds) {
+		bool isStatic = TargetIsStatic(gridId);
+		if(isStatic) {
+			int gridSize = TargetBlockCount(gridId);
+			if(gridSize > biggestGridSize) {
+				biggestGridId = gridId;
+				biggestGridSize = gridSize;
+			}
+		}
+	}
+	
+	if(biggestGridId > -1) {
+		coords = GetTrackedEntityPosition(biggestGridId);
+		return true;
+	}
+	else {
+		return false;
+	}
 }
 
-Vector3D getBombardStartLocation(Vector3D enemyBaseLocation, Vector3D planetCentre) {
+bool getBombardStartLocation(Vector3D enemyBaseLocation, Vector3D planetCentre, ref Vector3D coords) {
 	Vector3D gravLocal = Vector3D.Normalize(enemyBaseLocation - planetCentre);     
 	//Create drop point gps     
-	return targetData.HitPosition.Value + gravLocal*dist;     
+	coords =  enemyBaseLocation + gravLocal*dist;
+	return true;
 }
 
-void flyToLocation(Vector3D location) {
+void flyToLocation(Vector3D coords) {
+	remoteControl.ClearWaypoints();
+	remoteControl.AddWaypoint(coords, "Destination");
+	remoteControl.FlightMode = FlightMode.OneWay;
+	remoteControl.SetAutoPilotEnabled(true);
+	remoteControl.SetCollisionAvoidance(true);
+	remoteControl.SpeedLimit = speedLimit;
+}
+
+List<long> GetAllEnemyGrids(string specificFaction = "None", double distanceToCheck = 15000){
 	
+	try{
+		
+		Me.CustomData = specificFaction + "\n" + distanceToCheck.ToString();
+		return Me.GetValue<List<long>>("NpcExtender-GetAllEnemies");
+		
+	}catch(Exception exc){
+		
+		Echo("NpcExtender-GetAllEnemy Hard Fail");
+		return new List<long>();
+		
+	}
+
+}
+
+bool TargetIsStatic(long entityId){
+	
+	try{
+		
+		Me.CustomData = entityId.ToString();
+		return Me.GetValue<bool>("NpcExtender-TargetIsStatic");
+		
+	}catch(Exception exc){
+		
+		return false;
+		
+	}
+
+}
+
+int TargetBlockCount(long entityId){
+	
+	try{
+		
+		Me.CustomData = entityId.ToString();
+		return Me.GetValue<int>("NpcExtender-TargetBlockCount");
+		
+	}catch(Exception exc){
+		
+		return 0;
+		
+	}
+
+}
+
+Vector3D GetTrackedEntityPosition(long entityId){
+	
+	try{
+		
+		Me.CustomData = entityId.ToString();
+		return Me.GetValue<Vector3D>("NpcExtender-TrackEntity");
+		
+	}catch(Exception exc){
+		
+		return new Vector3D(0,0,0);
+		
+	}
+
 }
