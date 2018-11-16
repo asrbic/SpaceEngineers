@@ -43,7 +43,8 @@ Vector3D bombardGPS;
 long enemyBaseId;
 
 string lcdName = "LCD Panel";
-string remoteControlName = "Remote Control Forward";
+string remoteControlName = "(MAIN) Remote Control Forward";
+string backupRemoteControlName = "(BACKUP) Remote Control Forward";
 string ammoCargoName = "Ammo Small Cargo Container";
 string fuelCargoName = "Fuel Small Cargo Container";
 string bombardLauncherGroupName = "Bombard Launchers";
@@ -119,7 +120,7 @@ void Main() {
 					//SendChatMessage("bombardStartTime:" + bombardStartTime, "Space Pirates");
 					toggleBombardment(false);
 					status = RETREAT;
-					SendChatMessage("Bombardment procedure completed.", "Space Pirates");
+					SendChatMessage("Extermination procedure completed.", "Space Pirates");
 				}
 			}
 			else if(status == FLYING_TO_BOMBARD) {
@@ -142,14 +143,14 @@ void Main() {
 					if(bombardSet) {
 						flyToLocation(bombardGPS);
 						status = FLYING_TO_BOMBARD;
-						SendChatMessage("Active enemy installation detected. Commencing bombardment.", "Space Pirates");
+						SendChatMessage("Active enemy installation detected. Exterminating.", "Space Pirates");
 					}
 					else {
 						status = RETREAT;
 					}
 				}
 				else if(scanTime >= SCAN_DURATION) {
-					SendChatMessage("No activity detected. ", "Space Pirates");
+					SendChatMessage("No activity detected.", "Space Pirates");
 					status = RETREAT;					
 				}
 			}
@@ -157,7 +158,7 @@ void Main() {
 				if(distanceLessThan(remoteControl.GetPosition(), scanGPS, 20)) {
 					Echo("Start position reached!");
 					status = SCANNING;
-					SendChatMessage("Scanning position reached. Now scanning for enemy activity...", "Space Pirates");
+					SendChatMessage("Scanning for energy signatures...", "Space Pirates");
 				}
 			}
 			else {
@@ -260,7 +261,7 @@ bool getVectorPerpendicularToTarget(Vector3D target, Vector3D planetCentre, doub
 	//does not work
 	Vector3D targetNormalizedToPlanet = Vector3D.Normalize(target - planetCentre);
 	Vector3D offsetNormalizedToTarget = Vector3D.Normalize(new Vector3D(xOffset, yOffset, zOffset) - target);
-	coords =  target + targetNormalizedToPlanet * offsetNormalizedToTarget;
+	coords = target + targetNormalizedToPlanet * offsetNormalizedToTarget;
 	//coords =  target + offsetNormalizedToPlanet;
 	return true;
 }
@@ -277,6 +278,17 @@ void flyToLocation(Vector3D coords) {
 	remoteControl.SetAutoPilotEnabled(true);
 	remoteControl.SetCollisionAvoidance(true);
 	remoteControl.SpeedLimit = speedLimit;
+	try {
+		IMyRemoteControl backup = GridTerminalSystem.GetBlockWithName(backupRemoteControlName) as IMyRemoteControl;
+		if(backup != null) {
+			backup.ClearWaypoints();
+			backup.SetAutoPilotEnabled(false);
+			backup.SetCollisionAvoidance(false);
+		}
+	}
+	catch(Exception e) {
+		Echo("Backup Remote Control not found.");
+	}
 }
 
 List<long> GetAllEnemyGrids(string specificFaction = "None", double distanceToCheck = 15000) {
