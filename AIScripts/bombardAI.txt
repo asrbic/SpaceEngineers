@@ -1,13 +1,6 @@
-//Kinetic ordnance drop point targeting assist by 2crashandburn     
-//v1.2    
-     
-//Very simple script for giving people a bad day by dropping stuff on them using only gravity with pinpoint accuracy     
-//Setup is simple: get a programmable block with this script, a camera and an lcd     
-//Using it: go into camera view, look at your victim and run this script from the toolbar. Then get the gps coords from the lcd panel     
-//You can do this from your doomsday device or a small scouting vessel     
 double retreatRange = 6000;
-double range = 5000;					//range you want to scan (recommended max is world viewrange setting)     
-double startAltitude = 1200;						//distance of drop point above target
+double range = 5000;   
+double startAltitude = 1200;
 double bombardAltitude = 700;
 int speedLimit = 50;
 int scanProgress = 0;
