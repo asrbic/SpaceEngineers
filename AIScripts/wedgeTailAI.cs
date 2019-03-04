@@ -1,84 +1,76 @@
-const short SPAWNED = 0;
-const short FLYING_TO_START = 1;
-const short SCANNING = 2;
-const short ENEMY_FOUND = 3;
-const short FLYING_TO_BOMBARD = 4;
-const short BOMBARDING = 5;
-const short RETREAT = 6;
-const short RETREATING = 7;
-
 const short RESPONSE_WEAK = 1;
 const short RESPONSE_MEDIUM = 2;
 const short RESPONSE_STRONG = 3;
 
 const int UPDATE_FREQUENCY = 100;
 const int EXECUTION_FREQUENCY = UPDATE_FREQUENCY * 10;
-const int DETECT_COOLDOWN = EXECUTION_FREQUENCY * 20;
+const int DETECT_COOLDOWN = EXECUTION_FREQUENCY * 30;
 const int REFILL_FREQUENCY = UPDATE_FREQUENCY * 200;
+const int DISPATCH_DURATION = EXECUTION_FREQUENCY * 7;
 
 const string RESPONSE_WEAK_NAME = "Insignificant threat sighted. Dispatching response...";
 const string RESPONSE_MEDIUM_NAME = "Notable threat sighted. Dispatching response...";
 const string RESPONSE_STRONG_NAME = "Radiation detected. Dispatching strong response...";
+const string NORMAL_ANTENNA_NAME = "Wedge Tailed Scout";
 
 double visualRange = 3000;   
 int speedLimit = 50;
 long tickTimer = 0;
 long lastDispatchedTime = 0 - DETECT_COOLDOWN;
 
-bool planetCentreSet = false;
-short status = SPAWNED;
 
-Vector3D planetCentreGPS;
 
-string lcdName = "LCD Panel";
-string remoteControlName = "(MAIN) Remote Control Forward";
-string backupRemoteControlName = "(CRUISE) Remote Control Forward";
-string ammoCargoName = "Ammo Small Cargo Container";
-string fuelCargoName = "Fuel Small Cargo Container";
-string bombardLauncherGroupName = "Bombard Launchers";
-string bombardGyroName = "Gyroscope Spin";
-string forwardMarkerName = "Battery Forwards";
-string backwardMarkerName = "Battery Backwards";
-string raycastCameraName = "Recon Camera";
+string remoteControlName = "Remote Control";
 IMyRemoteControl remoteControl = null;
-IMyCameraBlock reconCamera = null;
+List<IMyCameraBlock> cameras = null;
 Dictionary<long, short> activeTargets = new Dictionary<long, short>();
-
+HashSet<long> knownNPCGridIds = new HashSet<long>();
+HashSet<long> knownPlayerGridIds = new HashSet<long>();
 public Program() {
 	Runtime.UpdateFrequency = UpdateFrequency.Update10;
+	setAntennaName(NORMAL_ANTENNA_NAME);
 }
 
 void Main() {
-	tickTimer += UPDATE_FREQUENCY;
 	if(tickTimer % EXECUTION_FREQUENCY == 0) {
 		run();
 	}
+	tickTimer += UPDATE_FREQUENCY;
 }
 
 void run() {
-	// SendChatMessage("TickTimer:" + tickTimer, "Space Pirates");
+	//SendChatMessage("TickTimer:" + tickTimer + "lastDispatched:" + lastDispatchedTime + "DIS_DURATION:" + DISPATCH_DURATION, "Space Pirates");
+	if(lastDispatchedTime > 0 && lastDispatchedTime + DISPATCH_DURATION <= tickTimer) {
+		setAntennaName(NORMAL_ANTENNA_NAME);
+		lastDispatchedTime = 0;
+	}
 	if(lastDispatchedTime + DETECT_COOLDOWN > tickTimer) {
 		//response has been dispatched too recently. Do not Scan. 
 		return;
 	}
+	
 	remoteControl = GridTerminalSystem.GetBlockWithName(remoteControlName) as IMyRemoteControl;
 	if(remoteControl == null) {
 		Echo("no remote control found, aborting");
 		return;
 	}
 	Echo("Remote control found.");
-	IMyCameraBlock
-	reconCamera = getCamera();
-	if(reconCamera == null) {
-		Echo("Recon camera not found.");
+	cameras = getCameras();
+	if(cameras.Count == 0){
+		Echo("No camera found.");
+	}
+	else {
+		foreach (IMyCameraBlock camera in cameras) {
+			if(!camera.EnableRaycast) {
+				camera.EnableRaycast = true;
+			}
+		}
 	}
 	long targetId = detectNearbyEnemies();
 	if(targetId != 0) {
 		Echo("targetId:" + targetId + " response:" + activeTargets[targetId]);
 		dispatchResponse(targetId, activeTargets[targetId]);
 	}
-	refillIfApplicable();
-	printStatus();
 
 }
 
@@ -88,7 +80,44 @@ long detectNearbyEnemies() {
 	Echo("Found " + enemyGridIds.Count + " enemy grids.\n");
 	short response = 0;
 	long target = 0;
+	bool NPCGridIdsUpdated = false;
+	Echo("Known NPC/Player grid counts:" + knownNPCGridIds.Count + "/" + knownPlayerGridIds.Count);
+
 	foreach (long gridId in enemyGridIds) {
+		if(!knownPlayerGridIds.Contains(gridId)) {
+			//SendChatMessage("_!known player grid", "Space Pirates");
+			if(knownNPCGridIds.Contains(gridId)) {
+				//SendChatMessage("__known NPC grid", "Space Pirates");
+				continue;
+			}
+			else {
+				if(NPCGridIdsUpdated) {
+					//SendChatMessage("___NPCs already updated, adding new player grid", "Space Pirates");
+					knownPlayerGridIds.Add(gridId);
+				}
+				else {
+					//SendChatMessage("___Updating NPC grids", "Space Pirates");
+					knownNPCGridIds = getNPCGridIds();
+					NPCGridIdsUpdated = true;
+					string gridsString = "";
+					foreach(long id in knownNPCGridIds) {
+						gridsString += id + ",";
+					}
+					//SendChatMessage("updated NPCs:" + gridsString, "Space Pirates");
+
+					if(knownNPCGridIds.Contains(gridId)) {
+						//SendChatMessage("____gridId was in newly updated NPC grid list", "Space Pirates");
+						continue;
+					}
+					else {
+						//SendChatMessage("____gridId was NOT in newly updated NPC grid list. Adding to know player grids", "Space Pirates");
+						knownPlayerGridIds.Add(gridId);
+					}
+				}
+				
+			}
+		}
+		//SendChatMessage("MDEI: " + mdei.Name + " " + mdei.Type, "Space Pirates");
 		if(TargetPowered(gridId)) {
 			Echo("target " + gridId + " is powered");
 			long activeTargetBlock = findReactors(gridId);
@@ -101,6 +130,7 @@ long detectNearbyEnemies() {
 			else {
 				Echo("casting ray at grid " + gridId);
 				MyDetectedEntityType entityType = castRayAt(gridId);
+				Echo("Entity type:" + entityType);
 				if(entityType == MyDetectedEntityType.SmallGrid) {
 					Echo("target " + gridId + " is a visible small grid");
 					response += RESPONSE_WEAK;
@@ -117,7 +147,9 @@ long detectNearbyEnemies() {
 					Echo("target " + gridId + " can fly");
 					response += RESPONSE_WEAK;
 				}
-				activeTargets.Add(target, response);
+				if(!activeTargets.ContainsKey(target)) {
+					activeTargets.Add(target, response);
+				}
 				return target;
 			}
 		}
@@ -126,12 +158,38 @@ long detectNearbyEnemies() {
 	return target;
 }
 
+HashSet<long> getNPCGridIds() {
+	string[] factions = {"MILT", "IMDC",  "CIVL", "Icore", "Junk", "LT-V", "Rust", "VCOR", "Traders"};
+	int dist = (int)visualRange + 2000;
+	HashSet<long> grids = knownNPCGridIds;
+	for(int i = 0; i < factions.Length; ++i) {
+		var factionGrids = GetAllEnemyGrids(factions[i], dist);
+		//SendChatMessage(factions[i] + ":" + factionGrids.Count, "Space Pirates");
+		foreach(long id in factionGrids) {
+			if(!grids.Contains(id)) {
+				grids.Add(id);
+			}
+		}
+		//SendChatMessage("grids.Count:"+ ":" + grids.Count, "Space Pirates");
+
+	}
+	return grids;
+}
+
 MyDetectedEntityType castRayAt(long gridId) {
 	//TODO - check for empty enum (this will either be null or set to empty)
-	if(reconCamera != null) {
-		MyDetectedEntityInfo mdei = reconCamera.Raycast(GetTrackedEntityPosition(gridId));
-		return mdei.Type;
+	Vector3D targetPos = GetTrackedEntityPosition(gridId);
+	foreach (IMyCameraBlock camera in cameras) {
+		if(camera != null && camera.IsFunctional && camera.CanScan(targetPos)) {
+			Echo("Recon camera found");
+			Echo("Range: " + camera.AvailableScanRange.ToString());
+			MyDetectedEntityInfo mdei = camera.Raycast(targetPos);
+			Echo("MDEI:" + mdei);
+			return mdei.Type;
+		}
 	}
+	Echo("No viable camera found");
+
 	return MyDetectedEntityType.None;
 }
 
@@ -152,63 +210,30 @@ void dispatchResponse(long gridId, short response) {
 		antennaName = RESPONSE_STRONG_NAME;
 	}
 	if(antennaName != null) {
-		List<IMyRadioAntenna> antennae = new List<IMyRadioAntenna>();
-		GridTerminalSystem.GetBlocksOfType(antennae);
-		if(antennae.Any()) {
-			IMyRadioAntenna antenna = antennae[0];
-			antenna.CustomName = antennaName;
-			antenna.ApplyAction("OnOff_On");
-			if(!antenna.GetValue<bool>("EnableBroadCast")) {
-				antenna.ApplyAction("EnableBroadCast");
-			}
-		}
+		setAntennaName(antennaName);
 	}
+	lastDispatchedTime = tickTimer;
 	//NEED TO CHECK IF THIS CAN SPAWN prefabs with drone behaviour or only prefabs with no behaviour. If the latter, probably need to use antennaes instead
 	//SpawnReinforcements(string spawnType, string spawnName, string spawnFaction, bool mustSpawnAll, Vector3D spawnCoords, Vector3D forwardDirection, Vector3D upDirection, Vector3D spawnVelocity)
 }
 
-IMyCameraBlock getCamera() {
-	//TODO error checking
-	return GridTerminalSystem.GetBlockWithName(raycastCameraName) as IMyCameraBlock;
-}
-
-void refillIfApplicable() {
-	if(tickTimer % REFILL_FREQUENCY == 0) {
-		IMyTerminalBlock fuelCargo = GridTerminalSystem.GetBlockWithName(fuelCargoName);
-		if(fuelCargo == null) {
-			Echo("Warning! Fuel cargo container not found.");
-			return;
-		}
-		bool createdSuccessfully = CreateItemInInventory("MyObjectBuilder_Ingot", "Uranium", 20, fuelCargo.GetId());
-		if(!createdSuccessfully) {
-			Echo("Failed to refill reactor fuel");
+void setAntennaName(String name) {
+	List<IMyRadioAntenna> antennae = new List<IMyRadioAntenna>();
+	GridTerminalSystem.GetBlocksOfType(antennae);
+	if(antennae.Any()) {
+		IMyRadioAntenna antenna = antennae[0];
+		antenna.CustomName = name;
+		antenna.ApplyAction("OnOff_On");
+		if(!antenna.GetValue<bool>("EnableBroadCast")) {
+			antenna.ApplyAction("EnableBroadCast");
 		}
 	}
 }
 
-void printStatus() {
-	Echo("STATUS: " + status);
-	Echo("planetCentreSet:" + planetCentreSet);
-}
-
-bool getPlanetCentre(ref Vector3D coords) {
-	//Get planetary centre gps from control block     
-	IMyShipController control = GridTerminalSystem.GetBlockWithName(remoteControlName) as IMyShipController;  
-	if(control == null) {  
-		Echo("Control block not found");  
-		return false;  
-	}  
-	Vector3D planetCentre = new Vector3D(0,0,0);     
-	bool insideGrav = control.TryGetPlanetPosition(out planetCentre);  
-	   
-	if (insideGrav) {
-		coords = planetCentre;
-		return true;
-	}
-	else {
-		return false;
-	}
-	
+List<IMyCameraBlock> getCameras() {
+	List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
+	GridTerminalSystem.GetBlocksOfType<IMyCameraBlock>(cameras);
+	return cameras;
 }
 
 bool interpolateByDistance(Vector3D a, Vector3D b, double distance, ref Vector3D coords) {
@@ -238,17 +263,6 @@ void flyToLocation(Vector3D coords) {
 	remoteControl.SetAutoPilotEnabled(true);
 	remoteControl.SetCollisionAvoidance(true);
 	remoteControl.SpeedLimit = speedLimit;
-	try {
-		IMyRemoteControl backup = GridTerminalSystem.GetBlockWithName(backupRemoteControlName) as IMyRemoteControl;
-		if(backup != null) {
-			backup.ClearWaypoints();
-			backup.SetAutoPilotEnabled(false);
-			backup.SetCollisionAvoidance(false);
-		}
-	}
-	catch(Exception e) {
-		Echo("Backup Remote Control not found.");
-	}
 }
 
 List<long> GetAllEnemyGrids(string specificFaction = "None", double distanceToCheck = 15000) {
@@ -498,4 +512,20 @@ long GetTargetShipSystem(long targetEntityId, string targetSystems = "MyObjectBu
 		
 	}
 
+}
+
+MyDetectedEntityInfo GetMDEI(long entityId){
+	
+	try{
+		
+		Me.CustomData = entityId.ToString();
+		return Me.GetValue<MyDetectedEntityInfo>("NpcExtender-GetDetectedEntityInfo");
+		
+	}catch(Exception exc){
+		
+		Echo("Hard fail NpcExtender-GetDetectedEntityInfo");
+		return new MyDetectedEntityInfo();
+		
+	}
+	
 }
