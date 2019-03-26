@@ -23,28 +23,37 @@ namespace IngameScript
     partial class Program : MyGridProgram
     {
         #endregion
+        #region public
         //General settings
-        int rank = 1;
-        Tactic tactic = Tactic.Default;
-        double range = 500;
-
+        AllyData myData = new AllyData
+        {
+            rank = 1,
+            tactic = Tactic.Default,
+            range = 500
+        };
         //tactic specific settings
-        CarrierSpawn[] spawns = { new CarrierSpawn{ } };
-        string[] carrierPrefabs = { "[PvEThreat] Seagull", "[PvEThreat] Minor" };
-        //Vector3D[] carrierPrefabOffsets = 
-        
+        //Carrier
+        PrefabData[] spawns = { new PrefabData("[PvEThreat] Seagull", 1), new PrefabData("[PvEThreat] Minor", 2), new PrefabData("[PvEThreat] Ibis", 2), new PrefabData("[PvEThreat] Magpie", 3) };
+        Vector3D[] prefabOffsets = { new Vector3D(20, 0, 0), new Vector3D(40, 0, 0), new Vector3D(60, 0, 0) };
+        int maxCostPerWave = 4;
+        int maxWavesToSpawn = 4;
+        int secondsBetweenWaves = 120;
+        //bombard
+        string bombardLogicBlock;
+
         //detection settings
         double activeAntennaDetectionRange = 0;
         double activeReactorDetectionRange = 0;
         double visualDetectionRange = 0;
         double playerDetectionRange = 0;
         double cheatDetectionRange = 0;
-
+        #endregion
+        
         /**** INTERNAL - DO NOT MODIFY BELOW HERE ****/
-
+        #region TypeDefs
         public enum Tactic
         {
-            Default, Small, Large, Carrier, Boss, GravityBombard, Ram, MissileSniper, StaticSniper
+            Default, Small, Large, Carrier, Boss, Bombard, GravityBombard, Ram, None
         };
 
         struct TargetData
@@ -53,6 +62,7 @@ namespace IngameScript
             public int threatLevel;
             public long gridId;
             public long blockId;
+            public long lastActiveTick;
             public MyDetectedEntityInfo mdei;
         }
 
@@ -63,70 +73,103 @@ namespace IngameScript
             public long lastUpdatedTick;
             public int rank;
             public double range;
+            public Vector3D location;
             public MyDetectedEntityInfo mdei;
             public Tactic tactic;
-            public Command cmd;
+            public List<Command> cmds;
+            public int currentCommandIndex;
         }
 
         struct Command
         {
+            public int priority;
             public CommandType type;
             public long targetId;
             public Vector3D targetVec;
             public Status status;
+
+            public Command(int priority, CommandType ct, long targetId, Vector3D targetVec, Status status = Status.New)
+            {
+                this.priority = priority;
+                this.type = ct;
+                this.targetId = targetId;
+                this.targetVec = targetVec;
+                this.status = status;
+            }
+
+            public Command(int priority, CommandType type) : this(priority, type, 0, Vector3D.Zero) { }
         }
+
+        struct CommandTrigger
+        {
+            public int index;
+            public long id;
+            public CommandTriggerCause reason;
+
+            public CommandTrigger(int index, long id, CommandTriggerCause reason)
+            {
+                this.index = index;
+                this.id = id;
+                this.reason = reason;
+            }
+        }
+        
+        public enum CommandTriggerCause
+        {
+            NewEnemy, RemovedEnemy, NewAlly, CommandUpdate
+        };
 
         public enum CommandType
         {
-            None, Info, Move, Formation, FormationLead, Attack, Bombard
+            None, Info, Move, MoveVia, MovePrecise, Formation, FormationLead, Attack, Bombard, Scan, Despawn
         };
+        CommandType[] transitiveCommandTypes = { CommandType.Scan, CommandType.FormationLead, CommandType.MoveVia };
 
         public enum Status
         {
-            New, Started, Finished
+            New, Started, Finished, Impossible
         };
 
-        struct CarrierSpawn
+        struct PrefabData
         {
-            string[] subTypeIds;
-            Vector3D[] offsets;
-            int supply;
+            public string id;
+            public int cost;
 
-            CarrierSpawn(string[] subTypeIds, Vector3D[] offsets, int supply)
+            public PrefabData(string id, int cost)
             {
-                this.subTypeIds = subTypeIds;
-                this.offsets = offsets;
-                this.supply = supply;
+                this.id = id;
+                this.cost = cost;
             }
-        };
+        }
+        #endregion
 
-
+        #region Fields
         int updateFrequency;
         int executionFrequency;
         long tickTimer;
-        bool execute;
-        long lastAllyScan = 0;
-        long gridId;
+        long lastRunTick;
+        long lastAllyScan;
         long commanderGridId;
 
         List<IMyRemoteControl> remoteControls = null;
         List<IMyRadioAntenna> antennae = null;
         List<IMyCameraBlock> cameras = null;
         IMyRemoteControl activeRC = null;
-        Vector3D currentLocation;
 
-        Command myCommand;
+        bool isCommander;
         double MOVE_WAYPOINT_TOLERANCE = 50;
         double FORMATION_WAYPOINT_TOLERANCE = 20;
+        Queue<CommandTrigger> commandTriggers;
+        double DISTANCE_FROM_PLAYER_TO_DESPAWN = 5000;
 
         double maxDetectionRange;
         HashSet<long> knownNPCGridIds = new HashSet<long>();
         HashSet<long> knownPlayerGridIds = new HashSet<long>();
         const double NPC_RANGE_ADD = 1000;
+        long SECONDS_BEFORE_MARK_INACTIVE = 120;
 
         const double ALLY_RANGE_MULT = 1000;
         const long ALLY_REFRESH_FREQUENCY = 1000;
-        bool isCommander;
         IMyBroadcastListener handshakeListener;
 
         const string COMM_HANDSHAKE = "HANDSHAKE";
@@ -137,18 +180,35 @@ namespace IngameScript
         IMyProgrammableBlock formationPB;
         int formationStatus = 0;
 
+        Random rand;
+
+        long bombardStartTime;
+        long lastSpawnTime;
+        int waveSpawnsRemaining;
+        IMyProgrammableBlock bombardPB = null;
+        IMyTimerBlock bombardTimer = null;
+        IMyBlockGroup bombardGroup = null;
+
         Dictionary<long, TargetData> knownTargets = new Dictionary<long, TargetData>();
         Dictionary<long, AllyData> knownAllies = new Dictionary<long, AllyData>();
+        Dictionary<long, long> commIdLookup = new Dictionary<long, long>();
+        #endregion
 
+        #region Core
         public Program()
         {
-            gridId = Me.CubeGrid.EntityId;
+            tickTimer = 0;
+            lastRunTick = 0;
+            bombardStartTime = 0;
+            lastSpawnTime = 0;
+            lastAllyScan = 0;
             handshakeListener = IGC.RegisterBroadcastListener(COMM_HANDSHAKE);
             handshakeListener.SetMessageCallback(COMM_HANDSHAKE);
             isCommander = true;
-            myCommand = new Command();
-            myCommand.type = CommandType.None;
-            myCommand.status = Status.New;
+            myData.gridId = Me.CubeGrid.EntityId;
+            myData.cmds = new List<Command>();
+            myData.currentCommandIndex = -1;
+            commandTriggers = new Queue<CommandTrigger>();
             setExecutionFrequency(50);
             maxDetectionRange = Math.Max(activeAntennaDetectionRange, max(activeReactorDetectionRange, visualDetectionRange));
             remoteControls = new List<IMyRemoteControl>();
@@ -158,6 +218,25 @@ namespace IngameScript
             antennae = new List<IMyRadioAntenna>();
             GridTerminalSystem.GetBlocksOfType<IMyRadioAntenna>(antennae);
             formationPB = (IMyProgrammableBlock)GridTerminalSystem.GetBlockGroupWithName(FORMATION_PB_NAME);
+            
+            bombardGroup = GridTerminalSystem.GetBlockGroupWithName(bombardLogicBlock);
+            if(bombardGroup == null)
+            {
+                IMyTerminalBlock bombLogic = GridTerminalSystem.GetBlockWithName(bombardLogicBlock);
+                if (bombLogic != null)
+                {
+                    if (bombLogic is IMyProgrammableBlock)
+                    {
+                        bombardPB = bombLogic as IMyProgrammableBlock;
+                    }
+                    else if (bombLogic is IMyTimerBlock)
+                    {
+                        bombardTimer = bombLogic as IMyTimerBlock;
+                    }
+                }
+            }
+            waveSpawnsRemaining = maxWavesToSpawn;
+            rand = new Random();
         }
 
         void setExecutionFrequency(int frequency)
@@ -184,8 +263,6 @@ namespace IngameScript
                 return;
             }
             executionFrequency = frequency;
-            tickTimer = 0;
-            execute = true;
         }
 
         void Main(string argument, UpdateType updateSource)
@@ -193,36 +270,42 @@ namespace IngameScript
             //if (argument != null && updateSource == UpdateType.IGC)
             //{
             //}
-            if (execute)
+            if (updateSource == UpdateType.Update1 || updateSource == UpdateType.Update10 || updateSource == UpdateType.Update100)
             {
-                if (tickTimer % executionFrequency == 0)
+                if (tickTimer >= lastRunTick + executionFrequency)
                 {
+                    lastRunTick = tickTimer;
                     run();
                 }
+                tickTimer += updateFrequency;
             }
-            tickTimer += updateFrequency;
+            else
+            {
+                handleMessages();
+            }
         }
 
         void run()
         {
             if (!setup())
-            {
+            {//setup failed - probably couldn't find RC
                 return;
             }
             foreach (AllyData ad in knownAllies.Values)
             {
-                Echo("ally info| isCommander:" + (commanderGridId == ad.gridId) + " id:" + ad.gridId + " rank:" + ad.rank + "\n");
+                Echo("ally info| isCommander:" + (commanderGridId == ad.gridId) + " id:" + ad.gridId + " rank:" + ad.rank + " tactic:" + ad.tactic.ToString() + " range:" + ad.range + "\n");
             }
             handleMessages();
             if (isCommander)
             {
-                updateTargets();
+                updateEnemies();
                 if (knownTargets.Any())
                 {
                     updateAllies();
                 }
+                updateCommands();
             }
-            executeCommand();
+            executeCommands();
         }
 
         bool setup()
@@ -248,10 +331,31 @@ namespace IngameScript
                 Echo("No Remote Control found - aborting.");
                 return false;
             }
-            currentLocation = activeRC.GetPosition();
+            myData.location = activeRC.GetPosition();
             return true;
         }
 
+        bool elapsedTicksCheck(long a, long wait)
+        {
+            if(a  + wait >= tickTimer)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        bool elapsedSecondsCheck(long a, int seconds)
+        {
+            TimeSpan ts = new TimeSpan(tickTimer - a);
+            if(ts.Seconds >= seconds)
+            {
+                return true;
+            }
+            return false;
+        }
+        #endregion
+
+        #region Comms
         /******************* COMMS *************************/
         void handleMessages()
         {
@@ -308,55 +412,55 @@ namespace IngameScript
             {//probably target data from previous commander
                 if(cmd.type == CommandType.Info)
                 {
-                    if(!knownTargets.ContainsKey(cmd.targetId))
+                    TargetData td;
+                    if (knownTargets.ContainsKey(cmd.targetId))
                     {
-                        TargetData td = new TargetData();
+                        td = knownTargets[cmd.targetId];
+                    }
+                    else
+                    {
+                        td = new TargetData();
                         td.gridId = cmd.targetId;
-                        td.position = cmd.targetVec;
-                        knownTargets[cmd.targetId] = td;
+                        commandTriggers.Enqueue(new CommandTrigger(0, td.gridId, CommandTriggerCause.NewEnemy));
+                    }
+                    td.position = cmd.targetVec;
+                    td.lastActiveTick = tickTimer;
+                    knownTargets[cmd.targetId] = td;
+                }
+                else
+                {// probably command completed notification
+                    AllyData? nad = getAllyByCommId(msg.Source);
+                    if(nad.HasValue)
+                    {
+                        AllyData ad = nad.Value;
+                        ad.cmds[cmd.priority] = cmd;
+                        if(cmd.priority > ad.currentCommandIndex)
+                        {
+                            ad.currentCommandIndex = cmd.priority;
+                        }
+                        updateTacticalCapability(ref ad, cmd);
+                        knownAllies[ad.gridId] = ad;
+                        commandTriggers.Enqueue(new CommandTrigger(cmd.priority, ad.gridId, CommandTriggerCause.CommandUpdate));
                     }
                 }
             }
-            else
-            {//command directive
-                myCommand = cmd;
-                setRunSpeed(cmd.type);
-                if(myCommand.type == CommandType.Formation)
-                {
-                    formationStatus = 0;
-                }
+            else if(msg.Source == knownAllies[commanderGridId].addr)
+            {//command directive from commander
+                setCommand(myData, cmd);
             }
         }
 
-        void setRunSpeed(CommandType ct)
+        AllyData? getAllyByCommId(long id)
         {
-            int newExecutionFrequency = executionFrequency;
-
-            if (ct == CommandType.Move)
+            if(IGC.Me == id)
             {
-                newExecutionFrequency = 50;
+                return myData;
             }
-            else if (ct == CommandType.None)
+            else if(commIdLookup.ContainsKey(id))
             {
-                newExecutionFrequency = 200;
+                return knownAllies[commIdLookup[id]];
             }
-            else if(ct == CommandType.Formation)
-            {
-                newExecutionFrequency = 5;
-            }
-            else if (ct == CommandType.Attack)
-            {
-                newExecutionFrequency = 1;
-            }
-            else if(ct == CommandType.Bombard)
-            {
-                newExecutionFrequency = 10;
-            }
-
-            if (executionFrequency != newExecutionFrequency)
-            {
-                setExecutionFrequency(executionFrequency);
-            }
+            return null;
         }
 
         void handleHandshakeMessage(MyIGCMessage msg, bool reply)
@@ -385,8 +489,8 @@ namespace IngameScript
                 ad.tactic = sourceTactic;
                 ad.addr = sourceCommId;
                 ad.range = sourceRange;
-                knownAllies[sourceGridId] = ad;
-                if ((sourceRank > rank || (sourceRank == rank && sourceGridId < gridId)))
+                updateAlly(ad);
+                if (getRankingGrid(sourceRank, sourceGridId, myData.rank, myData.gridId) == sourceGridId)
                 {//pass baton
                     if (isCommander)
                     {
@@ -401,6 +505,13 @@ namespace IngameScript
                     }
                     commanderGridId = sourceGridId;
                 }
+                else if(sourceRank < 0)
+                {// comm source is retreating/disabled
+                    if(commanderGridId == sourceGridId)
+                    {// source is relinquishing command - select new
+                        selectNewCommander();
+                    }
+                }
                 if(reply)
                 {
                     IGC.SendUnicastMessage(sourceCommId, COMM_HANDSHAKE, getHandshakeMsgData());
@@ -414,6 +525,32 @@ namespace IngameScript
             }
         }
 
+        void selectNewCommander()
+        {
+            long maxId = myData.gridId;
+            int maxRank = myData.rank;
+            foreach(AllyData ad in knownAllies.Values)
+            {
+                long id = getRankingGrid(maxRank, maxId, ad.rank, ad.gridId);
+                if(id == ad.gridId)
+                {
+                    maxId = ad.gridId;
+                    maxRank = ad.rank;
+                }
+            }
+            if(maxId == myData.gridId)
+            {// I am the new commander
+                isCommander = true;
+                commanderGridId = myData.gridId;
+                IGC.SendBroadcastMessage(COMM_HANDSHAKE, getHandshakeMsgData());
+            }
+            else
+            {// new commander is a known ally
+                isCommander = false;
+                commanderGridId = maxId;
+            }
+        }
+
         MyTuple<long, long, int, int, double> getHandshakeMsgData(MyIGCMessage msg)
         {
             return (MyTuple<long, long, int, int, double>)msg.Data;
@@ -421,7 +558,7 @@ namespace IngameScript
 
         MyTuple<long, long, int, int, double> getHandshakeMsgData()
         {
-            return new MyTuple<long, long, int, int, double>(IGC.Me, gridId, rank, (int)tactic, range);
+            return new MyTuple<long, long, int, int, double>(IGC.Me, myData.gridId, myData.rank, (int)myData.tactic, myData.range);
         }
 
         bool sendCommand(long targetAddr, Command cmd)
@@ -437,189 +574,31 @@ namespace IngameScript
             }
         }
 
-        MyTuple<int, long, Vector3D> serialiseCommand(Command cmd)
+        MyTuple<int, int, long, Vector3D> serialiseCommand(Command cmd)
         {
-            return new MyTuple<int, long, Vector3D>((int)cmd.type, cmd.targetId, cmd.targetVec);
+            return new MyTuple<int, int, long, Vector3D>(cmd.priority, (int)cmd.type, cmd.targetId, cmd.targetVec);
         }
 
         Command deserialiseCommand(MyIGCMessage msg)
         {
-            MyTuple<int, long, Vector3D> tuple = (MyTuple<int, long, Vector3D>)msg.Data;
-            Command cmd = new Command();
-            cmd.type = (CommandType)tuple.Item1;
-            cmd.targetId = tuple.Item2;
-            cmd.targetVec = tuple.Item3;
-            cmd.status = Status.New;
-            return cmd;
+            MyTuple<int, int, long, Vector3D> tuple = (MyTuple<int, int, long, Vector3D>)msg.Data;
+            return new Command(tuple.Item1, (CommandType)tuple.Item2, tuple.Item3, tuple.Item4);
         }
 
-        MyTuple<int, long, Vector3D> targetDataToCommand(TargetData td)
+        MyTuple<int, int, long, Vector3D> targetDataToCommand(TargetData td)
         {
-            return new MyTuple<int, long, Vector3D>((int)CommandType.Info, td.gridId, td.position);
+            return new MyTuple<int, int, long, Vector3D>(0, (int)CommandType.Info, td.gridId, td.position);
         }
+        #endregion
 
-        /******************* CORE LOOPS *************************/
-        void executeCommand()
-        {//TODO
-            if(formationStatus != 0 && myCommand.type != CommandType.Formation)
-            {// attempt to turn off formation PB
-                if (formationPB != null && formationPB.IsWorking)
-                {
-                    if(formationPB.TryRun("start"))
-                    {
-                        formationStatus = 0;
-                    }
-                }
-                else
-                {
-                    formationStatus = 0;
-                }
-            }
-            if (myCommand.status == Status.Finished)
-            {
-                return;
-            }
-            Vector3D grav = activeRC.GetNaturalGravity();
-            bool inGravity = false;
-            if (grav.Length() > 0)
-            {
-                inGravity = true;
-            }
-            CommandType ct = myCommand.type;
-            if (ct == CommandType.None)
-            {// Do nothing
-
-            }
-            else if (ct == CommandType.Move || ct == CommandType.FormationLead)
-            {// Move to target position
-                if (myCommand.status == Status.New)
-                {//initiate movement
-                    flyToLocation(myCommand.targetVec);
-                    myCommand.status = Status.Started;
-                }
-                else if (myCommand.status == Status.Started)
-                {// Check if end condition met
-                    if (distanceLessThan(currentLocation, myCommand.targetVec, MOVE_WAYPOINT_TOLERANCE))
-                    {//End condition met - inform commander
-                        notifyCommandCompleted();
-                    }
-                }
-                if (ct == CommandType.FormationLead)
-                {//I am the leader
-                    IGC.SendBroadcastMessage<MyTuple<MatrixD, Vector3D>>("FSLeaderSystem1", 
-                        new MyTuple<MatrixD, Vector3D>(activeRC.WorldMatrix, activeRC.GetShipVelocities().LinearVelocity));
-                }
-            }
-            else if (ct == CommandType.Formation)
-            {// Move into formation with target grid with offset dictated by vec
-                if(myCommand.status == Status.New)
-                {//Activate formation PB
-                    if (formationPB != null && formationPB.IsWorking)
-                    {
-                        if (formationStatus == 0)
-                        {//run success
-                            if (formationPB.TryRun("setoffset;" + myCommand.targetVec.X + ";" + myCommand.targetVec.Y + ";" + myCommand.targetVec.Z))
-                                formationStatus = 1;
-                        }
-                        if (formationStatus == 1)
-                        {
-                            if (formationPB.TryRun("start"))
-                            {//run success
-                                formationStatus = 2;
-                                myCommand.status = Status.Started;
-                            }
-                        }
-                    }
-                }
-            }
-            else if (ct == CommandType.Bombard)
-            {// attack the target from a distance with tactic x
-                long targetId = myCommand.targetId;
-                //probably notify complete command if ammunition/drones exhausted
-                if(tactic == Tactic.Carrier)
-                {//spawn drones etc
-                    
-                }
-                else if(tactic == Tactic.GravityBombard)
-                {// move to position above target and bombard
-
-                }
-                else if(tactic == Tactic.MissileSniper)
-                {// move to position at range then fire missiles
-
-                }
-                else if(tactic == Tactic.StaticSniper)
-                {// move to position at range then fire static weapons (if any)
-                    
-                }
-            }
-            else if(ct == CommandType.Attack)
-            {// engage target with tactic x
-
-            }
-
-        }
-
-        void enterFormation(long targetId, Vector3D offset)
-        {//woefully incomplete
-            Vector3D leadPos = GetTrackedEntityPosition(targetId);
-            leadPos += offset;
-            flyToLocation(leadPos);
-        }
-
+        #region Entities
         void updateAllies()
-        {
-            scanForNewAllies();
-            updateCommands();
-        }
-
-        void updateCommands()
-        {
-            if (knownTargets.Any())
-            {
-
-            }
-            else
-            {//form up on commander if no targets
-                foreach(long id in knownAllies.Keys)
-                {
-                    AllyData ad = knownAllies[id];
-                    if(ad.cmd.type != CommandType.Formation)
-                    {
-                        ad.cmd = getFormationCommand(ad, gridId);
-                        knownAllies[id] = ad;
-                        sendCommand(ad.addr, ad.cmd);
-                    }
-                }
-            }
-        }
-
-        Command getFormationCommand(AllyData ad, long target)
-        {
-            Command cmd = new Command
-            {
-                type = CommandType.Formation,
-                status = Status.New,
-                targetId = target,
-                //need to amend this
-                targetVec = new Vector3D(rank * 100, 0, 0)
-            };
-            return cmd;
-        }
-
-        void notifyCommandCompleted()
-        {
-            myCommand.status = Status.Finished;
-            sendCommand(knownAllies[commanderGridId].addr, myCommand);
-        }
-
-
-        void scanForNewAllies()
         {
             if (tickTimer - lastAllyScan >= ALLY_REFRESH_FREQUENCY)
             {
+                bool newAllyFound = false;
                 lastAllyScan = tickTimer;
-                List<long> alliedGrids = GetAllAlliedGrids(rank * ALLY_RANGE_MULT);
+                List<long> alliedGrids = GetAllAlliedGrids(myData.rank * ALLY_RANGE_MULT);
                 foreach (long allyGridId in alliedGrids)
                 {
                     if (!knownAllies.ContainsKey(allyGridId))
@@ -627,14 +606,19 @@ namespace IngameScript
                         AllyData ad = new AllyData();
                         ad.gridId = allyGridId;
                         ad.rank = -1;
-                        knownAllies.Add(allyGridId, ad);
-                        IGC.SendBroadcastMessage(COMM_HANDSHAKE, getHandshakeMsgData());
+                        updateAlly(ad);
+                        newAllyFound = true;
+                        commandTriggers.Enqueue(new CommandTrigger(0, allyGridId, CommandTriggerCause.NewAlly));
                     }
+                }
+                if (newAllyFound)
+                {
+                    IGC.SendBroadcastMessage(COMM_HANDSHAKE, getHandshakeMsgData());
                 }
             }
         }
 
-        void updateTargets()
+        void updateEnemies()
         {
             List<long> enemyGridIds = GetAllEnemyGrids("None", maxDetectionRange);
             Echo("Found " + enemyGridIds.Count + " enemy grids.\n");
@@ -656,7 +640,7 @@ namespace IngameScript
                     int threatLevel = 0;
                     long targetBlockId = 0;
                     MyDetectedEntityInfo mdei = new MyDetectedEntityInfo();
-                    double distanceToTarget = Vector3D.Distance(targetPosition, currentLocation);
+                    double distanceToTarget = Vector3D.Distance(targetPosition, myData.location);
                     bool detected = false;
                     if (inRange(distanceToTarget, cheatDetectionRange))
                     {
@@ -683,7 +667,7 @@ namespace IngameScript
                         }
                     }
                     if (!detected && inRange(distanceToTarget, visualDetectionRange))
-                    {
+                    {//TODO: cast ray at random location withing target's bounding box
                         mdei = castRayAt(gridId);
                         if (!mdei.IsEmpty() && (mdei.Type == MyDetectedEntityType.SmallGrid || mdei.Type == MyDetectedEntityType.LargeGrid))
                         {
@@ -705,7 +689,8 @@ namespace IngameScript
                         {
                             td = new TargetData();
                             td.gridId = gridId;
-                            knownTargets.Add(gridId, td);
+                            td.lastActiveTick = tickTimer;
+                            commandTriggers.Enqueue(new CommandTrigger(0, td.gridId, CommandTriggerCause.NewEnemy));
                         }
                         if (mdei.IsEmpty())
                         {
@@ -715,41 +700,15 @@ namespace IngameScript
                         td.blockId = targetBlockId;
                         td.mdei = mdei;
                         td.threatLevel = threatLevel;
+                        knownTargets[gridId] = td;
+                        if (!isCommander)
+                        {//update commander with latest target data
+                            IGC.SendUnicastMessage(knownAllies[commanderGridId].addr, COMM_COMMAND, targetDataToCommand(td));
+                        }
                     }
                 }
             }
             Echo("No valid targets found.");
-        }
-
-        void flyToLocation(Vector3D coords, float speedLimit = 20, bool collisionAvoidance = true)
-        {
-            activeRC.ClearWaypoints();
-            activeRC.AddWaypoint(coords, "1");
-            activeRC.FlightMode = FlightMode.OneWay;
-            activeRC.IsMainCockpit = true;
-            activeRC.SetAutoPilotEnabled(true);
-            activeRC.SetCollisionAvoidance(collisionAvoidance);
-            activeRC.SpeedLimit = speedLimit;
-        }
-
-        bool inRange(double distance, double limit)
-        {
-            if (limit > 0 && distance <= limit)
-            {
-                return true;
-            }
-            return false;
-        }
-
-        long findReactors(long gridId)
-        {
-            long blockId = GetTargetShipSystem(gridId, "MyObjectBuilder_Reactor");
-            return blockId;
-        }
-
-        bool distanceLessThan(Vector3D a, Vector3D b, double dist)
-        {
-            return Vector3D.Distance(a, b) < dist;
         }
 
         bool isNPCGrid(long gridId, bool NPCGridIdsUpdated)
@@ -795,6 +754,671 @@ namespace IngameScript
                 }
             }
             return false;
+        }
+
+        void updateKnownTargets()
+        {//remove old/inactive/disabled targets
+            foreach(TargetData td in knownTargets.Values)
+            {
+                TimeSpan ts = new TimeSpan(tickTimer - td.lastActiveTick);
+                if (ts.Seconds > SECONDS_BEFORE_MARK_INACTIVE)
+                {//target hasn't been detected as active in too long - remove it
+                    knownTargets.Remove(td.gridId);
+                    commandTriggers.Enqueue(new CommandTrigger(0, td.gridId, CommandTriggerCause.RemovedEnemy));
+                }
+            }
+        }
+
+        void updateAllyLocation(AllyData ad)
+        {
+            if(ad.lastUpdatedTick != tickTimer)
+            {
+                ad.mdei = GetMDEI(ad.gridId);
+                ad.location = ad.mdei.Position;
+                ad.lastUpdatedTick = tickTimer;
+                updateAlly(ad);
+            }
+        }
+        #endregion
+
+        #region Tactical
+        void executeCommands()
+        {//TODO
+            Vector3D grav = activeRC.GetNaturalGravity();
+            bool inGravity = false;
+            if (grav.Length() > 0)
+            {
+                inGravity = true;
+            }
+
+            bool cont = true;
+            CommandType ct;
+            Status status;
+            Command myCommand;
+            Tactic tactic = myData.tactic;
+            for (int i = myData.currentCommandIndex; cont && i < myData.cmds.Count; ++i)
+            {
+                myCommand = myData.cmds[i];
+                ct = myCommand.type;
+                status = myCommand.status;
+                cont = transitiveCommandTypes.Contains(ct);
+                if (formationStatus != 0 && ct != CommandType.Formation)
+                {// attempt to turn off formation PB
+                    if (formationPB != null && formationPB.IsWorking)
+                    {
+                        if (formationPB.TryRun("stop"))
+                        {
+                            formationStatus = 0;
+                        }
+                    }
+                    else
+                    {
+                        formationStatus = 0;
+                    }
+                }
+                if (status == Status.Finished || status == Status.Impossible)
+                {
+                    continue;
+                }
+
+                if (ct == CommandType.None)
+                {// Do nothing
+
+                }
+                else if (ct == CommandType.Scan)
+                {
+                    updateEnemies();
+                }
+                else if (ct == CommandType.Move || ct == CommandType.MoveVia)
+                {// Move to target position
+                    if (status == Status.New)
+                    {//initiate movement
+                        flyToLocation(myCommand.targetVec);
+                        status = Status.Started;
+                    }
+                    else if (status == Status.Started)
+                    {// Check if end condition met
+                        if (distanceLessThan(myData.location, myCommand.targetVec, MOVE_WAYPOINT_TOLERANCE))
+                        {//End condition met - inform commander
+                            changeMyCommandStatus(myCommand);
+                        }
+                    }
+                }
+                else if (ct == CommandType.FormationLead)
+                {//I am the leader
+                    IGC.SendBroadcastMessage<MyTuple<MatrixD, Vector3D>>("FSLeaderSystem1",
+                        new MyTuple<MatrixD, Vector3D>(activeRC.WorldMatrix, activeRC.GetShipVelocities().LinearVelocity));
+                }
+                else if (ct == CommandType.Formation)
+                {// Move into formation with target grid with offset dictated by vec
+                    if (status == Status.New)
+                    {//Activate formation PB
+                        if (formationPB != null && formationPB.IsWorking)
+                        {
+                            if (formationStatus == 0)
+                            {//run success
+                                if (formationPB.TryRun("setoffset;" + myCommand.targetVec.X + ";" + myCommand.targetVec.Y + ";" + myCommand.targetVec.Z))
+                                    formationStatus = 1;
+                            }
+                            if (formationStatus == 1)
+                            {
+                                if (formationPB.TryRun("start"))
+                                {//run success
+                                    formationStatus = 2;
+                                    status = Status.Started;
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (ct == CommandType.Bombard)
+                {// attack the target from a distance with tactic x
+                    long targetId = myCommand.targetId;
+                    //probably notify complete command if ammunition/drones exhausted
+                    if (tactic == Tactic.Carrier)
+                    {//spawn drones etc
+                        if(status == Status.New)
+                        {
+                            lastSpawnTime = tickTimer;
+                            myCommand.status = Status.Started;
+                            setCommand(myData, myCommand);
+                        }
+                        else if (elapsedSecondsCheck(lastSpawnTime, secondsBetweenWaves))
+                        {
+                            if (waveSpawnsRemaining > 0)
+                            {
+                                spawnPrefabWave();
+                            }
+                            else
+                            {
+                                changeMyCommandStatus(myCommand, Status.Impossible);
+                            }
+                        }
+                    }
+                    else if (tactic == Tactic.Bombard)
+                    {// move to position at range then activate bombard logic
+
+                    }
+                    else if (tactic == Tactic.GravityBombard)
+                    {// move to position above target and activate bombard logic
+
+                    }
+                }
+                else if (ct == CommandType.Attack)
+                {// engage target with tactic x
+
+                }
+                else if (ct == CommandType.Despawn)
+                {
+                    despawnIfPossible();
+                }
+            }
+
+        }
+
+        void despawnIfPossible()
+        {
+            Vector3D nearestPlayer = new Vector3D(0, 0, 0);
+            bool playerExists = activeRC.GetNearestPlayer(out nearestPlayer);
+            if (!playerExists || Vector3D.Distance(myData.location, nearestPlayer) > DISTANCE_FROM_PLAYER_TO_DESPAWN)
+            {
+                //SendChatMessage("Attempting Despawn", "Space Pirates");
+                AttemptDespawn();
+            }
+        }
+
+        void enterFormation(long targetId, Vector3D offset)
+        {//unused backup
+            Vector3D leadPos = GetTrackedEntityPosition(targetId);
+            leadPos += offset;
+            flyToLocation(leadPos);
+        }
+
+        void spawnPrefabWave()
+        {
+            int waveCost = 0;
+            List<PrefabData> prefabs = new List<PrefabData>();
+            int index = rand.Next(spawns.Length);
+            while(waveCost < maxCostPerWave && prefabs.Count < prefabOffsets.Length)
+            {
+                PrefabData pd = spawns[index];
+                prefabs.Add(pd);
+                waveCost += pd.cost;
+            }
+                
+            for(int i = 0; i < prefabs.Count; ++i)
+            {
+                PrefabData pd = prefabs[i];
+                SpawnReinforcements("Prefab", pd.id, Me.GetOwnerFactionTag(), true, getWorldPositionRelativeToMe(prefabOffsets[i]), 
+                    activeRC.WorldMatrix.Forward, activeRC.WorldMatrix.Up, activeRC.GetShipVelocities().LinearVelocity);
+            }
+            --waveSpawnsRemaining;            
+        }
+        #endregion
+
+        #region Command
+        void updateCommands()
+        {
+            if (knownTargets.Any())
+            {
+                issueCommands();
+            }
+            else
+            {//form up on commander if no targets
+                foreach (AllyData ad in knownAllies.Values)
+                {
+                    Command cmd = ad.cmds[0];
+                    if (cmd.type != CommandType.Formation)
+                    {
+                        cmd = getFormationCommand(ad, myData.gridId);
+                        setCommand(ad, cmd);
+                    }
+                }
+            }
+        }
+
+        void issueCommands()
+        {
+            CommandTrigger trigger;
+            while (commandTriggers.Any())
+            {
+                trigger = commandTriggers.Dequeue();
+                CommandTriggerCause reason = trigger.reason;
+                if (reason == CommandTriggerCause.NewAlly)
+                {
+                    issueCommandsForNewAlly(knownAllies[trigger.id]);
+                }
+                else if(reason == CommandTriggerCause.NewEnemy)
+                {// new target found - probably do something
+                    if(knownTargets.ContainsKey(trigger.id))
+                    {
+                        issueCommandsForNewTarget(knownTargets[trigger.id]);
+                    }
+                    
+                }
+                else if(reason == CommandTriggerCause.RemovedEnemy)
+                {// target no longer applicable - adjust any commands targeting it
+                    issueCommandsForRemovedTarget(trigger.id);
+                }
+                else if(reason == CommandTriggerCause.CommandUpdate)
+                {// command completed or impossible
+                    if(knownAllies.ContainsKey(trigger.id))
+                    {
+                        AllyData ad = knownAllies[trigger.id];
+                        if(ad.cmds.Count > trigger.index)
+                        {
+                            Command cmd = ad.cmds[trigger.index];
+                            issueCommandsForUpdatedCommand(ad, cmd);
+                        }
+                    }
+                }
+            }
+        }
+
+        void issueCommandsForNewAlly(AllyData ad)
+        {
+            if(knownTargets.Any())
+            {
+                assignNewTarget(ad);
+            }
+        }
+
+        void issueCommandsForNewTarget(TargetData td)
+        {
+            bool hasTarget;
+            foreach(AllyData ad in knownAllies.Values)
+            {
+                hasTarget = false;
+                for(int i = ad.currentCommandIndex; i < ad.cmds.Count; ++i)
+                {
+                    Command cmd = ad.cmds[i];
+                    if(cmd.type == CommandType.Attack || cmd.type == CommandType.Bombard)
+                    {
+                        hasTarget = true;
+                        break;
+                    }
+                }
+                if(!hasTarget)
+                {
+                    assignNewTarget(ad, td);
+                }
+            }
+        }
+
+        void issueCommandsForRemovedTarget(long id)
+        {
+            TargetData td;
+            bool alternateExists = findTarget(out td, id);
+            if (alternateExists)
+            {
+                foreach (AllyData ad in knownAllies.Values)
+                {
+                    for (int i = ad.currentCommandIndex; i < ad.cmds.Count; ++i)
+                    {
+                        Command cmd = ad.cmds[i];
+                        if ((cmd.type == CommandType.Attack || cmd.type == CommandType.Bombard))
+                        {
+                            if (id == cmd.targetId)
+                            {
+                                assignNewTarget(ad, td);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        void issueCommandsForUpdatedCommand(AllyData ad, Command cmd)
+        {TODO
+            if(cmd.status == Status.Finished)
+            {
+                if(cmd.type == CommandType.Attack)
+                {//need a target
+                    TargetData td;
+                    bool hasAlternate = findTarget(out td, cmd.targetId);
+                    if (hasAlternate)
+                    {
+                        assignNewTarget(ad, td);
+                    }
+                    else
+                    {// no more viable targets
+                        updateAllyLocation(ad);
+                        retreat(ad);
+                    }
+                }
+                else if(cmd.type == CommandType.Move || cmd.type == CommandType.MovePrecise)
+                {//maybe enter formation
+                    
+                }
+
+            }
+            else if(cmd.status == Status.Impossible)
+            {
+                
+                if(cmd.type == CommandType.Attack)
+                {// probably disabled or out of ammo
+                    ram(ad);
+                }
+                else if (cmd.type == CommandType.Bombard)
+                {// bombard resources depleted - attack or retreat
+                    postBombard(ad, cmd.targetId);
+                }
+            }
+        }
+
+        void postBombard(AllyData ad, long targetId)
+        {
+            if (rand.Next(2) == 0)
+            {
+                updateAllyLocation(ad);
+                retreat(ad, targetId);
+            }
+            else
+            {
+                assignNewTarget(ad, knownTargets[targetId]);
+            }
+        }
+
+        void retreat(AllyData ad, long gridId)
+        {//retreat from an enemy grid with id gridId
+            retreat(ad, knownTargets[gridId].position);
+        }
+
+        void retreat(AllyData ad)
+        {//retreat backwards
+            retreat(ad, ad.mdei.Orientation.Forward);
+        }
+
+        void retreat(AllyData ad, Vector3D avoid)
+        {
+            Command retreatMoveCommand = new Command(0, CommandType.MovePrecise);
+            retreatMoveCommand.targetVec = getRetreatVector(ad.location, avoid);
+            setCommand(ad, retreatMoveCommand);
+            Command retreatCommand = new Command(1, CommandType.Despawn);
+            setCommand(ad, retreatCommand);
+        }
+
+        bool findTarget(out TargetData ret, long targetToAvoid = 0)
+        {
+            ret = new TargetData();
+            bool targetFound = false;
+            foreach(TargetData td in knownTargets.Values)
+            {
+                if(td.gridId != targetToAvoid)
+                {
+                    ret = td;
+                    targetFound = true;
+                    break;
+                }
+            }
+            return targetFound;
+        }
+
+        void ram(AllyData ad)
+        {TODO
+
+        }
+
+        void assignNewTarget(AllyData ad)
+        {
+            TargetData td;
+            if(findTarget(out td))
+            {
+                assignNewTarget(ad, td);
+            }
+        }
+
+        void assignNewTarget(AllyData ad, TargetData td)
+        {
+            if(ad.tactic == Tactic.Bombard)
+            {
+                if (distanceLessThan(ad.location, td.position, ad.range))
+                {
+                    //start bombarding new target
+                    setCommand(ad, new Command(0, CommandType.Bombard, td.gridId, td.position));
+                }
+                else
+                {
+                    setCommand(ad, new Command(0, CommandType.Move, 0, calculateBombardPosition(ad)));
+                    setCommand(ad, new Command(1, CommandType.Bombard, td.gridId, td.position));
+                    //move to bombardment range
+                }
+            }
+        }
+
+        void setCommand(AllyData ad, Command cmd)
+        {
+            if (cmd.type != CommandType.Info)
+            {
+                List<Command> cmds = ad.cmds;
+                cmds[cmd.priority] = cmd;
+                int removeStartIndex = cmd.priority + 1;
+                if (removeStartIndex < cmds.Count + 1)
+                {
+                    cmds.RemoveRange(removeStartIndex, cmds.Count - removeStartIndex);
+                }
+                if (cmd.priority <= ad.currentCommandIndex)
+                {
+                    ad.currentCommandIndex = cmd.priority;
+                    if (ad.Equals(myData))
+                    {//updating me
+                        setRunSpeed(cmd.type);
+                    }
+                }
+                if(!ad.Equals(myData))
+                {//not me
+                    sendCommand(ad.addr, cmd);
+                }
+
+            }
+        }
+
+        void setRunSpeed(CommandType ct)
+        {
+            int newExecutionFrequency = executionFrequency;
+
+            if (ct == CommandType.Move)
+            {
+                newExecutionFrequency = 50;
+            }
+            else if (ct == CommandType.None)
+            {
+                newExecutionFrequency = 200;
+            }
+            else if (ct == CommandType.Formation)
+            {
+                newExecutionFrequency = 5;
+            }
+            else if (ct == CommandType.Attack)
+            {
+                newExecutionFrequency = 1;
+            }
+            else if (ct == CommandType.Bombard)
+            {
+                newExecutionFrequency = 100;
+            }
+
+            if (executionFrequency != newExecutionFrequency)
+            {
+                setExecutionFrequency(executionFrequency);
+            }
+        }
+
+        Command getFormationCommand(AllyData ad, long target)
+        {
+            return new Command(0, CommandType.Formation, target, new Vector3D(ad.rank * 100, 0, 0));
+        }
+
+        void changeMyCommandStatus(Command cmd, Status status = Status.Finished)
+        {
+            cmd.status = status;
+            myData.cmds[cmd.priority] = cmd;
+            updateTacticalCapability(ref myData, cmd);
+            sendCommand(knownAllies[commanderGridId].addr, cmd);
+        }
+
+        bool updateTacticalCapability(ref AllyData ad, Command cmd)
+        {
+            if (cmd.status == Status.Impossible)
+            {//ally can probably no longer perform some tactics
+                Tactic updated = ad.tactic;
+                if (cmd.type == CommandType.Bombard)
+                {
+                    updated = Tactic.Default;
+                }
+                else if (cmd.type == CommandType.Attack)
+                {
+                    if (ad.tactic == Tactic.Default)
+                    {
+                        updated = Tactic.Ram;
+                    }
+                    else if(ad.tactic == Tactic.Ram)
+                    {
+                        updated = Tactic.None;
+                    }
+                }
+                if (updated != ad.tactic)
+                {
+                    ad.tactic = updated;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        #endregion
+
+        #region Nav
+        bool inGravity()
+        {
+            return activeRC.GetNaturalGravity().Length() > 0;
+        }
+        Vector3D calculateBombardPosition(AllyData ad, TargetData td)
+        {
+            Vector3D vec;
+            if(inGravity())
+            {
+                //get bombard location myData.range meters away, 33 degrees above horizon
+            }
+            else
+            {
+                vec =  interpolateByDistance(ad.location, td.position, myData.range);
+            }
+            return vec;
+        }
+
+        Vector3D calculateGravityBombardPosition(AllyData ad, TargetData td)
+        {
+            Vector3D planet;
+            bool nearPlanet = activeRC.TryGetPlanetPosition(out planet);
+            return interpolateByDistance();
+        }
+
+        Vector3D getRetreatVector(Vector3D start, Vector3D avoid)
+        {
+            return interpolateByDistance(avoid, start, DISTANCE_FROM_PLAYER_TO_DESPAWN * 2);
+        }
+
+        Vector3D interpolateByDistance(Vector3D a, Vector3D b, double distance)
+        {
+            Vector3D aNormalizedToB = Vector3D.Normalize(a - b);
+            return a + aNormalizedToB * distance;
+        }
+
+        Vector3D getWorldPositionRelativeToMe(Vector3D offset)
+        {
+            return Vector3D.Transform(offset, activeRC.WorldMatrix);
+        }
+
+        void addGPSToRC(Command cmd)
+        {
+            activeRC.AddWaypoint(cmd.targetVec, cmd.priority.ToString());
+        }
+
+        void goToLocation(Vector3D gps, bool precisionMode)
+        {
+            if(activeRC.HasWheels)
+            {
+                driveToLocation(gps);
+            }
+            else
+            {
+                flyToLocation(gps, precisionMode);
+            }
+        }
+
+        void driveToLocation(Vector3D gps)
+        {//TODO
+
+        }
+
+        void flyToLocation(Vector3D coords, bool precisionMode = true, float speedLimit = 20, bool collisionAvoidance = true)
+        {
+            activeRC.ClearWaypoints();
+            activeRC.AddWaypoint(coords, "1");
+            activeRC.FlightMode = FlightMode.OneWay;
+            activeRC.IsMainCockpit = true;
+            activeRC.SetAutoPilotEnabled(true);
+            activeRC.SetCollisionAvoidance(collisionAvoidance);
+            activeRC.SetDockingMode(precisionMode);
+            activeRC.SpeedLimit = speedLimit;
+        }
+        #endregion
+
+        #region Support
+        
+        long getRankingGrid(int rankA, long idA, int rankB, long idB)
+        {
+            if(rankA > rankB || (rankA == rankB && idA < idB))
+            {
+                return idA;
+            }
+            return idB;
+        }
+
+        void updateAlly(AllyData ad)
+        {
+            if (ad.addr != 0)
+            {
+                if(!commIdLookup.ContainsKey(ad.addr))
+                {
+                    commIdLookup[ad.addr] = ad.gridId;
+                }
+            }
+            knownAllies[ad.gridId] = ad;
+        }
+
+        void removeAlly(AllyData ad)
+        {
+            if(knownAllies.ContainsKey(ad.gridId))
+            {
+                knownAllies.Remove(ad.gridId);
+            }
+            if (commIdLookup.ContainsKey(ad.addr))
+            {
+                commIdLookup.Remove(ad.addr);
+            }
+        }
+
+        bool inRange(double distance, double limit)
+        {
+            if (limit > 0 && distance <= limit)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        long findReactors(long gridId)
+        {
+            long blockId = GetTargetShipSystem(gridId, "MyObjectBuilder_Reactor");
+            return blockId;
+        }
+
+        bool distanceLessThan(Vector3D a, Vector3D b, double dist)
+        {
+            return Vector3D.Distance(a, b) < dist;
         }
 
         MyDetectedEntityInfo castRayAt(long gridId)
@@ -853,7 +1477,9 @@ namespace IngameScript
             SendChatMessage("Me.actions:" + s, "SPRT");
             return s;
         }
+        #endregion
 
+        #region MES
         /********* MES scripts ********/
         List<long> GetAllEnemyGrids(string specificFaction = "None", double distanceToCheck = 15000)
         {
@@ -1025,7 +1651,6 @@ namespace IngameScript
 
         bool AttemptDespawn()
         {
-
             try
             {
 
@@ -1191,6 +1816,8 @@ namespace IngameScript
             }
 
         }
+        #endregion
+
         #region footer
         /////////////////////////////////
     }
